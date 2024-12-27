@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <ctype.h>
+#include <pthread.h>
 
 #define PORT 8080
 #define BUFFER_SIZE 1024
@@ -18,9 +19,9 @@ User* users = NULL;
 
 User* create_user(const char* username, const char* password){
     User* tmp = malloc(sizeof(User));
-    tmp -> username = malloc(strlen(username) + 1);
-    tmp -> password = malloc(strlen(password) + 1);
-    tmp -> next = NULL;
+    tmp->username = malloc(strlen(username) + 1);
+    tmp->password = malloc(strlen(password) + 1);
+    tmp->next = NULL;
     strcpy(tmp->username, username);
     strcpy(tmp->password, password);
     return tmp;
@@ -28,35 +29,40 @@ User* create_user(const char* username, const char* password){
 
 User* find_user(const char* username){
     User* tmp = users;
-    if (users == NULL) {
-        return NULL;
-    }
     while (tmp != NULL){
-        if (!strcmp(tmp -> username, username)){
-            break;
+        if (!strcmp(tmp->username, username)){
+            return tmp;
         }
+        tmp = tmp->next;
     }
-    if (!strcmp(tmp -> username, username)){
-        return tmp;
-    } else {
-        return NULL;
+    return NULL;
+}
+
+int user_count(){
+    User* tmp = users;
+    int count = 0;
+    while(tmp != NULL){
+        tmp = tmp -> next;
+        count++;
     }
+    return count;
 }
 
 int add_user(const char* username, const char* password){
     if (find_user(username) != NULL){
         return -1;
     }
-    User* last_user = create_user(username, password);
+    User* new_user = create_user(username, password);
     if (users == NULL){
-        users = last_user;
-        return 0;
+        users = new_user;
+    } else {
+        User* tmp = users;
+        while (tmp->next != NULL){
+            tmp = tmp->next;
+        }
+        tmp->next = new_user;
     }
-    User* tmp = users;
-    while (tmp -> next != NULL){
-        tmp = tmp -> next;
-    }
-    tmp -> next = last_user;
+    printf("NEW USER - USER COUNT = %d \n", user_count());
     return 0;
 }
 
@@ -95,7 +101,7 @@ void parse_post_data(const char *data, char *username, char *password) {
     username_start += strlen("username=");
     char *username_end = strchr(username_start, '&');
     if (username_end) {
-        strncpy(username, username_start, username_end - username_start); /*username&*/
+        strncpy(username, username_start, username_end - username_start);
         username[username_end - username_start] = '\0';
     } else {
         strcpy(username, username_start);
@@ -117,7 +123,6 @@ void parse_post_data(const char *data, char *username, char *password) {
     url_decode(password, password);
 }
 
-
 int send_file(int client_socket, const char* filename){
     FILE* file = fopen(filename, "r");
     if (!file) {
@@ -136,7 +141,11 @@ int send_file(int client_socket, const char* filename){
     fclose(file);
     return 0;
 }
-void handle_client(int client_socket) {
+
+void* handle_client(void* arg) {
+    int client_socket = *(int*)arg;
+    free(arg);
+
     char buffer[BUFFER_SIZE];
     read(client_socket, buffer, BUFFER_SIZE);
     printf("Received request:\n%s\n", buffer);
@@ -149,13 +158,13 @@ void handle_client(int client_socket) {
         const char *data = strstr(buffer, "\r\n\r\n") + 4;
         char username[256], password[256] = {0};
         parse_post_data(data, username, password);
-        printf("%s \n %s \n", username, password);
+        printf("Register - Username: %s, Password: %s\n", username, password);
         int flag;
         if (!(flag = add_user(username, password))){
-            printf("%d \n", flag);
+            printf("User added successfully\n");
             send_file(client_socket, "views/main.html");
         } else {
-            printf("%d \n", flag);
+            printf("User already exists\n");
             send_file(client_socket, "views/login.html");
         }   
     } else if (strstr(buffer, "GET /login") != NULL) {
@@ -164,22 +173,27 @@ void handle_client(int client_socket) {
         const char *data = strstr(buffer, "\r\n\r\n") + 4;
         char username[256], password[256] = {0};
         parse_post_data(data, username, password);
+        printf("Login - Username: %s, Password: %s\n", username, password);
         User* user = find_user(username);
-        if (user != NULL && !strcmp(user -> password, password)){
-            printf("user auth success \n");
+        if (user != NULL) {
+            printf("Stored Password: %s\n", user->password);
+        }
+        if (user != NULL && strstr(password, user->password) != NULL){
+            printf("User authentication successful\n");
             send_file(client_socket, "views/main.html");
         } else {
-            printf("invalid password or login \n%s\n%s\n%s\n", username, password, user->password);
+            printf("Invalid password or login\n");
             send_file(client_socket, "views/login.html");
         }
     } else {
         send_file(client_socket, "views/404.html");
     }
     close(client_socket);
+    return NULL;
 }
 
 int main() {
-    int server_fd, client_socket;
+    int server_fd, *client_socket;
     struct sockaddr_in address;
     int addrlen = sizeof(address);
 
@@ -207,14 +221,21 @@ int main() {
     printf("Server is listening on port %d\n", PORT);
 
     while (1) {
-        if ((client_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
+        client_socket = malloc(sizeof(int));
+        if ((*client_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
             perror("accept failed");
-            close(server_fd);
-            exit(EXIT_FAILURE);
+            free(client_socket);
+            continue;
         }
 
-        handle_client(client_socket);
+        pthread_t thread_id;
+        if (pthread_create(&thread_id, NULL, handle_client, client_socket) != 0) {
+            perror("pthread_create failed");
+            free(client_socket);
+        }
+        pthread_detach(thread_id);
     }
 
+    close(server_fd);
     return 0;
 }
